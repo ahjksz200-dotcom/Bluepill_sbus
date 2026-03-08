@@ -1,25 +1,67 @@
 #include <Arduino.h>
 
-// Định nghĩa các chân nhận tín hiệu từ RX MC6C
-const uint8_t pwm_pins[] = {PA0, PA1, PA2, PA3, PA4, PA5};
-volatile uint16_t pwm_values[6] = {1500, 1500, 1500, 1500, 1500, 1500};
-volatile uint32_t rise_time[6] = {0};
+#define CHANNELS 6
 
-// Các hàm ngắt đo xung
-void isr0() { (digitalRead(PA0) == HIGH) ? rise_time[0] = micros() : pwm_values[0] = micros() - rise_time[0]; }
-void isr1() { (digitalRead(PA1) == HIGH) ? rise_time[1] = micros() : pwm_values[1] = micros() - rise_time[1]; }
-void isr2() { (digitalRead(PA2) == HIGH) ? rise_time[2] = micros() : pwm_values[2] = micros() - rise_time[2]; }
-void isr3() { (digitalRead(PA3) == HIGH) ? rise_time[3] = micros() : pwm_values[3] = micros() - rise_time[3]; }
-void isr4() { (digitalRead(PA4) == HIGH) ? rise_time[4] = micros() : pwm_values[4] = micros() - rise_time[4]; }
-void isr5() { (digitalRead(PA5) == HIGH) ? rise_time[5] = micros() : pwm_values[5] = micros() - rise_time[5]; }
+const uint8_t pwmPins[CHANNELS] = {PA0, PA1, PA2, PA3, PA4, PA5};
 
-void setup() {
-    // SBUS: 100000 baud, 8 data bits, Even parity, 2 stop bits
-    Serial1.begin(100000, SERIAL_8E2);
+volatile uint16_t pwmRaw[CHANNELS] = {1500,1500,1500,1500,1500,1500};
+volatile uint32_t riseTime[CHANNELS];
 
-    for(int i=0; i<6; i++) {
-        pinMode(pwm_pins[i], INPUT_PULLUP);
+uint16_t sbusChannel[16];
+
+void handleInterrupt(uint8_t ch)
+{
+    if (digitalRead(pwmPins[ch])) {
+        riseTime[ch] = micros();
+    } else {
+        pwmRaw[ch] = micros() - riseTime[ch];
     }
+}
+
+void isr0(){handleInterrupt(0);}
+void isr1(){handleInterrupt(1);}
+void isr2(){handleInterrupt(2);}
+void isr3(){handleInterrupt(3);}
+void isr4(){handleInterrupt(4);}
+void isr5(){handleInterrupt(5);}
+
+void packSbus(uint8_t *packet)
+{
+    packet[0] = 0x0F;
+
+    packet[1]  = (sbusChannel[0] & 0xFF);
+    packet[2]  = ((sbusChannel[0] >> 8) | (sbusChannel[1] << 3)) & 0xFF;
+    packet[3]  = ((sbusChannel[1] >> 5) | (sbusChannel[2] << 6)) & 0xFF;
+    packet[4]  = (sbusChannel[2] >> 2) & 0xFF;
+    packet[5]  = ((sbusChannel[2] >> 10) | (sbusChannel[3] << 1)) & 0xFF;
+    packet[6]  = ((sbusChannel[3] >> 7) | (sbusChannel[4] << 4)) & 0xFF;
+    packet[7]  = ((sbusChannel[4] >> 4) | (sbusChannel[5] << 7)) & 0xFF;
+    packet[8]  = (sbusChannel[5] >> 1) & 0xFF;
+    packet[9]  = ((sbusChannel[5] >> 9) | (sbusChannel[6] << 2)) & 0xFF;
+    packet[10] = ((sbusChannel[6] >> 6) | (sbusChannel[7] << 5)) & 0xFF;
+    packet[11] = (sbusChannel[7] >> 3) & 0xFF;
+    packet[12] = (sbusChannel[8] & 0xFF);
+    packet[13] = ((sbusChannel[8] >> 8) | (sbusChannel[9] << 3)) & 0xFF;
+    packet[14] = ((sbusChannel[9] >> 5) | (sbusChannel[10] << 6)) & 0xFF;
+    packet[15] = (sbusChannel[10] >> 2) & 0xFF;
+    packet[16] = ((sbusChannel[10] >> 10) | (sbusChannel[11] << 1)) & 0xFF;
+    packet[17] = ((sbusChannel[11] >> 7) | (sbusChannel[12] << 4)) & 0xFF;
+    packet[18] = ((sbusChannel[12] >> 4) | (sbusChannel[13] << 7)) & 0xFF;
+    packet[19] = (sbusChannel[13] >> 1) & 0xFF;
+    packet[20] = ((sbusChannel[13] >> 9) | (sbusChannel[14] << 2)) & 0xFF;
+    packet[21] = ((sbusChannel[14] >> 6) | (sbusChannel[15] << 5)) & 0xFF;
+    packet[22] = (sbusChannel[15] >> 3) & 0xFF;
+
+    packet[23] = 0x00; // flags
+    packet[24] = 0x00; // end
+}
+
+void setup()
+{
+    Serial1.begin(100000, SERIAL_8E2); // SBUS
+
+    for(int i=0;i<CHANNELS;i++)
+        pinMode(pwmPins[i], INPUT_PULLUP);
 
     attachInterrupt(digitalPinToInterrupt(PA0), isr0, CHANGE);
     attachInterrupt(digitalPinToInterrupt(PA1), isr1, CHANGE);
@@ -29,33 +71,26 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(PA5), isr5, CHANGE);
 }
 
-void loop() {
-    static uint32_t last_send = 0;
-    if (millis() - last_send >= 14) { // Gửi mỗi 14ms (Chuẩn SBUS)
-        last_send = millis();
+void loop()
+{
+    static uint32_t lastSend = 0;
 
-        uint16_t sbus_ch[16];
-        for (int i = 0; i < 6; i++) {
-            uint16_t p = constrain(pwm_values[i], 1000, 2000);
-            sbus_ch[i] = map(p, 1000, 2000, 172, 1811);
+    if(millis() - lastSend >= 14)
+    {
+        lastSend = millis();
+
+        for(int i=0;i<CHANNELS;i++)
+        {
+            uint16_t p = constrain(pwmRaw[i],1000,2000);
+            sbusChannel[i] = map(p,1000,2000,172,1811);
         }
-        for (int i = 6; i < 16; i++) sbus_ch[i] = 1024; // Các kênh còn lại để giữa
+
+        for(int i=CHANNELS;i<16;i++)
+            sbusChannel[i] = 1024;
 
         uint8_t packet[25];
-        packet[0] = 0x0F; // Start Byte
-        packet[1] = (uint8_t) (sbus_ch[0] & 0x07FF);
-        packet[2] = (uint8_t) ((sbus_ch[0] >> 8) | (sbus_ch[1] << 3));
-        packet[3] = (uint8_t) ((sbus_ch[1] >> 5) | (sbus_ch[2] << 6));
-        packet[4] = (uint8_t) (sbus_ch[2] >> 2);
-        packet[5] = (uint8_t) ((sbus_ch[2] >> 10) | (sbus_ch[3] << 1));
-        packet[6] = (uint8_t) ((sbus_ch[3] >> 7) | (sbus_ch[4] << 4));
-        packet[7] = (uint8_t) ((sbus_ch[4] >> 4) | (sbus_ch[5] << 7));
-        packet[8] = (uint8_t) (sbus_ch[5] >> 1);
-        
-        for(int i = 9; i < 23; i++) packet[i] = 0; // Tạm để trống
-        packet[23] = 0x00; // Flags
-        packet[24] = 0x00; // End Byte
+        packSbus(packet);
 
-        Serial1.write(packet, 25);
+        Serial1.write(packet,25);
     }
 }
